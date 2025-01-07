@@ -5,10 +5,17 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import os
+from cryptography.x509 import load_pem_x509_certificate
+from cryptography.exceptions import InvalidSignature
+import datetime
 
 # Конфігурація клієнта
 SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 1222
+
+# Конфігурація СА
+CA_HOST = '127.0.0.1'
+CA_PORT = 1223
 
 # Завантажити публічний ключ сервера
 def load_public_key(serialized_public_key):
@@ -36,21 +43,66 @@ def decrypt_message(session_key, encrypted_message):
     decryptor = cipher.decryptor()
     return decryptor.update(encrypted_message[16:]) + decryptor.finalize()
 
+def get_ca_public_key():
+    ca_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ca_socket.connect((CA_HOST, CA_PORT))
+    
+    ca_socket.sendall(b"GET_CA_CERT")
+    ca_cert_pem = ca_socket.recv(4096)
+    ca_socket.close()
+    
+    ca_cert = load_pem_x509_certificate(ca_cert_pem)
+    return ca_cert.public_key()
+
+def verify_certificate(certificate_pem, ca_public_key):
+    try:
+        server_cert = load_pem_x509_certificate(certificate_pem)
+
+        print(server_cert.issuer)
+        
+        ca_public_key.verify(
+            server_cert.signature,
+            server_cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            server_cert.signature_hash_algorithm,
+        )
+        
+        current_time = datetime.datetime.now(datetime.UTC)
+        if current_time < server_cert.not_valid_before_utc or current_time > server_cert.not_valid_after_utc:
+            print("Certificate has expired or is not yet valid")
+            return None
+            
+        print("Certificate verification successful")
+        return server_cert.public_key()
+    except InvalidSignature:
+        print("Certificate verification failed: Invalid signature")
+        return None
+    except Exception as e:
+        print(f"Certificate verification failed: {e}")
+        return None
+
 def main():
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client_socket.connect((SERVER_HOST, SERVER_PORT))
     print("Connected to the server.")
-
-    # Надіслати client_hello
+    
+    # Клієнт відправляє client_hello
     client_hello = secrets.token_hex(16)
     client_socket.sendall(client_hello.encode())
     print(f"Sent client_hello: {client_hello}")
 
-    # Отримати server_hello та публічний ключ
+    # Клієнт отримує server_hello та сертифікат
     server_hello = client_socket.recv(1024).decode()
-    serialized_public_key = client_socket.recv(4096)
-    public_key = load_public_key(serialized_public_key)
-    print(f"Received server_hello: {server_hello}")
+    certificate = client_socket.recv(4096)
+
+    # Клієнт отримує публічний ключ СА
+    ca_public_key = get_ca_public_key()
+    
+    # Клієнт перевіряє сертифікат за допомогою публічного ключа СА
+    public_key = verify_certificate(certificate, ca_public_key)
+    if not public_key:
+        client_socket.close()
+        return
 
     # Згенерувати та надіслати зашифрований премастер секрет
     premaster_secret = secrets.token_hex(16)

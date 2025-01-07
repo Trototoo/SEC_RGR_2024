@@ -10,13 +10,17 @@ import os
 SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 1222
 
+# Конфігурація СА
+CA_HOST = '127.0.0.1'
+CA_PORT = 1223
+
 # Згенерувати RSA ключі сервера
 def generate_rsa_key_pair():
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_key = private_key.public_key()
     return private_key, public_key
 
-# Серіалізувати публічний ключ для відправки клієнту
+# Серіалізувати публічний ключ для відправки
 def serialize_public_key(public_key):
     return public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
@@ -42,10 +46,24 @@ def decrypt_message(session_key, encrypted_message):
     decryptor = cipher.decryptor()
     return decryptor.update(encrypted_message[16:]) + decryptor.finalize()
 
-def main():
-    # RSA-генерація ключів
-    private_key, public_key = generate_rsa_key_pair()
+def get_certificate(public_key):
+    # Підключення до CA
+    ca_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ca_socket.connect((CA_HOST, CA_PORT))
+    
+    # Відправка публічного ключа до СА
     serialized_public_key = serialize_public_key(public_key)
+    ca_socket.sendall(serialized_public_key)
+    
+    # Отримання сертифікату
+    certificate = ca_socket.recv(4096)
+    ca_socket.close()
+    return certificate
+
+def main():
+    # Генерування RSA ключів та отримання сертифікату
+    private_key, public_key = generate_rsa_key_pair()
+    certificate = get_certificate(public_key)
     
     # Налаштувати серверний сокет
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -60,11 +78,11 @@ def main():
     client_hello = conn.recv(1024).decode()
     print(f"Received client_hello: {client_hello}")
 
-    # Сервер відправляє server_hello та публічний ключ
+    # Сервер відправляє server_hello та сертифікат
     server_hello = secrets.token_hex(16)
     conn.sendall(server_hello.encode())
-    conn.sendall(serialized_public_key)
-    print(f"Sent server_hello: {server_hello} and public key")
+    conn.sendall(certificate)
+    print(f"Sent server_hello: {server_hello} and certificate")
 
     # Сервер отримує зашифрований премастер-секрет
     encrypted_premaster_secret = conn.recv(4096)
